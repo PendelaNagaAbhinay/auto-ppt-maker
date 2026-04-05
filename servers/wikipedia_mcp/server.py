@@ -30,7 +30,7 @@ logger = logging.getLogger("wikipedia_mcp")
 # Wikipedia client
 # ──────────────────────────────────────────────
 wiki = wikipediaapi.Wikipedia(
-    user_agent="auto-ppt-agent/1.0 (MCP server; educational project)",
+    user_agent="auto-ppt-agent",
     language="en",
 )
 
@@ -51,34 +51,58 @@ SKIP_SECTIONS = {
 # Helpers
 # ──────────────────────────────────────────────
 
-def _truncate_summary(text: str, sentences: int) -> str:
-    """Return the first *sentences* sentences from *text*."""
-    # Split on '. ' to get sentence boundaries (simple heuristic)
+def _truncate_sentences(text: str, sentences: int, max_chars: int = None) -> str:
+    """Return the first *sentences* sentences from *text*, optionally bounded by max_chars."""
     parts = text.split(". ")
     if len(parts) <= sentences:
-        return text
-    return ". ".join(parts[:sentences]) + "."
+        truncated = text
+    else:
+        truncated = ". ".join(parts[:sentences]) + "."
+    
+    # Clean output: Remove extra whitespace
+    truncated = " ".join(truncated.split())
+
+    if max_chars and len(truncated) > max_chars:
+        truncated = truncated[:max_chars - 3] + "..."
+    return truncated
 
 
 def _collect_sections(sections, depth: int = 0, max_depth: int = 2) -> list[dict]:
     """
     Recursively collect section title + content, skipping irrelevant ones.
-    Limits recursion to *max_depth* levels to avoid huge payloads.
     """
     result: list[dict] = []
     for section in sections:
         if section.title in SKIP_SECTIONS:
             continue
-        content = section.text.strip()
+        content = " ".join(section.text.strip().split())
         if content:
+            # First 2 sentences, max 300 chars
             result.append({
                 "title": section.title,
-                "content": content,
+                "content": _truncate_sentences(content, sentences=2, max_chars=300),
             })
-        # Recurse into subsections
         if depth < max_depth:
             result.extend(_collect_sections(section.sections, depth + 1, max_depth))
     return result
+
+
+def _get_page_resolved(topic: str):
+    """Fetch page, resolving disambiguation to the first valid link if necessary."""
+    page = wiki.page(topic)
+    if not page.exists():
+        return None
+    
+    summary = page.summary.strip()
+    if summary.endswith("may refer to:") or "disambiguation" in page.title.lower():
+        # Disambiguation page
+        if page.links:
+            # Pick first valid link
+            first_link_title = list(page.links.keys())[0]
+            page = wiki.page(first_link_title)
+            if not page.exists():
+                return None
+    return page
 
 
 # ──────────────────────────────────────────────
@@ -99,27 +123,24 @@ def get_summary(topic: str, sentences: int = 5) -> str:
     Returns:
         Plain text summary, or "NOT_FOUND:{topic}" if the page doesn't exist.
     """
-    logger.info("get_summary(topic=%r, sentences=%d)", topic, sentences)
+    logger.info("Fetching summary for %s", topic)
 
     try:
-        page = wiki.page(topic)
+        page = _get_page_resolved(topic)
 
-        if not page.exists():
-            logger.warning("Page not found: %s", topic)
+        if not page:
             return f"NOT_FOUND:{topic}"
 
-        summary = _truncate_summary(page.summary, sentences)
-        logger.info("Summary fetched for %r (%d chars).", topic, len(summary))
+        summary = " ".join(page.summary.split())
+        if not summary:
+            return f"NOT_FOUND:{topic}"
+
+        summary = _truncate_sentences(summary, sentences)
         return summary
 
-    except Exception:
-        tb = traceback.format_exc()
-        logger.error("get_summary failed:\n%s", tb)
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to fetch summary for '{topic}'.",
-            "details": tb,
-        })
+    except Exception as e:
+        logger.error("get_summary failed: %s", e)
+        return f"ERROR: {str(e)}"
 
 
 @mcp.tool
@@ -134,29 +155,29 @@ def get_sections(topic: str) -> str:
         topic: The Wikipedia article title to look up.
 
     Returns:
-        JSON string with sections, or "NOT_FOUND:{topic}" if the page doesn't exist.
+        JSON string with sections, or "[]" if not found or empty.
     """
-    logger.info("get_sections(topic=%r)", topic)
+    logger.info("Fetching sections for %s", topic)
 
     try:
-        page = wiki.page(topic)
+        page = _get_page_resolved(topic)
 
-        if not page.exists():
-            logger.warning("Page not found: %s", topic)
-            return f"NOT_FOUND:{topic}"
+        if not page:
+            return "[]"
 
         sections = _collect_sections(page.sections)
-        logger.info("Sections fetched for %r (%d sections).", topic, len(sections))
+        
+        # Limit to max 5 sections
+        sections = sections[:5]
+
+        if not sections:
+            return "[]"
+
         return json.dumps(sections, ensure_ascii=False)
 
-    except Exception:
-        tb = traceback.format_exc()
-        logger.error("get_sections failed:\n%s", tb)
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to fetch sections for '{topic}'.",
-            "details": tb,
-        })
+    except Exception as e:
+        logger.error("get_sections failed: %s", e)
+        return f"ERROR: {str(e)}"
 
 
 # ──────────────────────────────────────────────
