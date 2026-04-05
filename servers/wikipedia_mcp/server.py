@@ -30,8 +30,8 @@ logger = logging.getLogger("wikipedia_mcp")
 # Wikipedia client
 # ──────────────────────────────────────────────
 wiki = wikipediaapi.Wikipedia(
-    user_agent="auto-ppt-agent",
     language="en",
+    user_agent="auto-ppt-agent"
 )
 
 # Sections to skip — typically boilerplate / non-content
@@ -115,27 +115,31 @@ mcp = FastMCP("wikipedia_mcp")
 def get_summary(topic: str, sentences: int = 5) -> str:
     """
     Get a plain-text summary of a Wikipedia topic.
-
-    Args:
-        topic:     The Wikipedia article title to look up.
-        sentences: Maximum number of sentences to return (default 5).
-
-    Returns:
-        Plain text summary, or "NOT_FOUND:{topic}" if the page doesn't exist.
     """
     logger.info("Fetching summary for %s", topic)
 
     try:
-        page = _get_page_resolved(topic)
+        page = wiki.page(topic)
 
-        if not page:
+        if not page.exists():
             return f"NOT_FOUND:{topic}"
 
-        summary = " ".join(page.summary.split())
-        if not summary:
+        # Clean whitespace from the string up front
+        raw_summary = " ".join(page.summary.split())
+        
+        if not raw_summary:
             return f"NOT_FOUND:{topic}"
 
-        summary = _truncate_sentences(summary, sentences)
+        summary_parts = raw_summary.split(". ")
+        summary = ". ".join(summary_parts[:sentences])
+        
+        # Ensure it ends with a period if it was split
+        if len(summary_parts) > sentences and not summary.endswith("."):
+            summary += "."
+
+        import sys
+        safe_summary = summary[:100].encode("ascii", "ignore").decode("ascii")
+        print("Returning summary:", safe_summary, file=sys.stderr)
         return summary
 
     except Exception as e:
@@ -147,33 +151,42 @@ def get_summary(topic: str, sentences: int = 5) -> str:
 def get_sections(topic: str) -> str:
     """
     Get the sections of a Wikipedia article as a JSON string.
-
-    Returns a JSON array of objects: [{"title": "...", "content": "..."}]
-    Irrelevant sections (References, See also, etc.) are automatically skipped.
-
-    Args:
-        topic: The Wikipedia article title to look up.
-
-    Returns:
-        JSON string with sections, or "[]" if not found or empty.
     """
     logger.info("Fetching sections for %s", topic)
 
     try:
-        page = _get_page_resolved(topic)
+        page = wiki.page(topic)
 
-        if not page:
+        if not page.exists():
             return "[]"
 
-        sections = _collect_sections(page.sections)
-        
-        # Limit to max 5 sections
-        sections = sections[:5]
-
-        if not sections:
-            return "[]"
-
-        return json.dumps(sections, ensure_ascii=False)
+        data = []
+        for section in page.sections:
+            if section.title in SKIP_SECTIONS:
+                continue
+                
+            content = " ".join(section.text.split())
+            if not content:
+                continue
+                
+            # Limit content to 2 sentences and max 300 chars
+            content_parts = content.split(". ")
+            truncated_content = ". ".join(content_parts[:2])
+            if len(content_parts) > 2 and not truncated_content.endswith("."):
+                truncated_content += "."
+                
+            if len(truncated_content) > 300:
+                truncated_content = truncated_content[:297] + "..."
+                
+            data.append({
+                "title": section.title,
+                "content": truncated_content
+            })
+            
+            if len(data) >= 5:
+                break
+                
+        return json.dumps(data, ensure_ascii=False)
 
     except Exception as e:
         logger.error("get_sections failed: %s", e)

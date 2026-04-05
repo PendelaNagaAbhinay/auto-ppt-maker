@@ -1,2 +1,4 @@
 mcp
-httpx
+fastmcp
+requests
+python-dotenv
