@@ -1,0 +1,7 @@
+mcp
+fastmcp
+python-dotenv
+google-genai
+requests
+python-pptx
+wikipedia-api
